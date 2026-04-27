@@ -59,6 +59,7 @@ public class MainActivity extends AppCompatActivity {
     private BluetoothHidDevice bluetoothHidDevice;
     private BluetoothDevice connectedHost;
     private BluetoothDevice selectedDevice;
+    private String lastSentHidText = "";
 
     private TextView statusText;
     private EditText inputEditText;
@@ -116,14 +117,21 @@ public class MainActivity extends AppCompatActivity {
         public void onConnectionStateChanged(BluetoothDevice device, int state) {
             if (state == BluetoothProfile.STATE_CONNECTED) {
                 connectedHost = device;
+                lastSentHidText = "";
                 persistLastConnected(device);
                 updateStatus(getString(R.string.status_connected, readableName(device)));
+                Editable editable = inputEditText.getText();
+                if (editable != null && editable.length() > 0) {
+                    String text = editable.toString();
+                    hidExecutor.execute(() -> syncTextToHost(text));
+                }
             } else if (state == BluetoothProfile.STATE_CONNECTING) {
                 updateStatus(getString(R.string.status_connecting, readableName(device)));
             } else {
                 if (connectedHost != null && connectedHost.getAddress().equals(device.getAddress())) {
                     connectedHost = null;
                 }
+                lastSentHidText = "";
                 updateStatus(getString(R.string.status_disconnected, readableName(device)));
             }
             refreshSendState();
@@ -173,30 +181,15 @@ public class MainActivity extends AppCompatActivity {
                 if (connectedHost == null || bluetoothHidDevice == null) {
                     return;
                 }
-
-                if (before > 0) {
-                    hidExecutor.execute(() -> {
-                        for (int i = 0; i < before; i++) {
-                            sendBackspace();
-                            sleepShortly();
-                        }
-                    });
-                }
-
-                if (count > 0) {
-                    String inserted = s.subSequence(start, start + count).toString();
-                    hidExecutor.execute(() -> {
-                        for (char c : inserted.toCharArray()) {
-                            sendKeyForChar(c);
-                            sleepShortly();
-                        }
-                    });
-                }
             }
 
             @Override
             public void afterTextChanged(Editable s) {
-                // no-op
+                if (connectedHost == null || bluetoothHidDevice == null) {
+                    return;
+                }
+                String sourceText = s.toString();
+                hidExecutor.execute(() -> syncTextToHost(sourceText));
             }
         });
 
@@ -412,6 +405,74 @@ public class MainActivity extends AppCompatActivity {
         bluetoothHidDevice.sendReport(connectedHost, REPORT_ID_KEYBOARD, new byte[8]);
     }
 
+    private void syncTextToHost(String sourceText) {
+        String targetText = convertToHidText(sourceText);
+        int common = sharedPrefixLength(lastSentHidText, targetText);
+
+        for (int i = 0; i < lastSentHidText.length() - common; i++) {
+            sendBackspace();
+            sleepShortly();
+        }
+        for (int i = common; i < targetText.length(); i++) {
+            sendKeyForChar(targetText.charAt(i));
+            sleepShortly();
+        }
+        lastSentHidText = targetText;
+    }
+
+    private int sharedPrefixLength(String a, String b) {
+        int max = Math.min(a.length(), b.length());
+        int i = 0;
+        while (i < max && a.charAt(i) == b.charAt(i)) {
+            i++;
+        }
+        return i;
+    }
+
+    private String convertToHidText(String source) {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < source.length(); i++) {
+            char c = source.charAt(i);
+            if (KeyStroke.from(c) != null) {
+                out.append(c);
+                continue;
+            }
+            String fallback = convertUnsupportedChar(c);
+            if (!TextUtils.isEmpty(fallback)) {
+                out.append(fallback);
+            }
+        }
+        return out.toString();
+    }
+
+    private String convertUnsupportedChar(char c) {
+        if (c == '￥') {
+            return "$";
+        }
+        if (isLikelyCjk(c)) {
+            return transliterateCjkToLatin(c);
+        }
+        return "";
+    }
+
+    private boolean isLikelyCjk(char c) {
+        Character.UnicodeBlock block = Character.UnicodeBlock.of(c);
+        return block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS
+                || block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_A
+                || block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_B
+                || block == Character.UnicodeBlock.CJK_COMPATIBILITY_IDEOGRAPHS;
+    }
+
+    private String transliterateCjkToLatin(char c) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            return "";
+        }
+        android.icu.text.Transliterator transliterator = android.icu.text.Transliterator.getInstance(
+                "Han-Latin; NFD; [:Nonspacing Mark:] Remove; NFC; Lower()");
+        String raw = transliterator.transliterate(String.valueOf(c));
+        return raw.replaceAll("[^a-z0-9]", "");
+    }
+
     private void refreshSendState() {
         runOnUiThread(() -> {
             boolean readyToConnect = selectedDevice != null;
@@ -579,6 +640,16 @@ public class MainActivity extends AppCompatActivity {
                     return new KeyStroke((byte) 0x38, (byte) 0x00);
                 case '@':
                     return new KeyStroke((byte) 0x1F, (byte) 0x02);
+                case '+':
+                    return new KeyStroke((byte) 0x2E, (byte) 0x02);
+                case '=':
+                    return new KeyStroke((byte) 0x2E, (byte) 0x00);
+                case '*':
+                    return new KeyStroke((byte) 0x25, (byte) 0x02);
+                case '#':
+                    return new KeyStroke((byte) 0x20, (byte) 0x02);
+                case '%':
+                    return new KeyStroke((byte) 0x22, (byte) 0x02);
                 default:
                     return null;
             }
