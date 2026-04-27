@@ -16,14 +16,11 @@
     <string name="paired_devices_title">已配对设备（上次连接优先显示）</string>
     <string name="connect_selected">连接选中设备</string>
     <string name="input_hint">使用手机系统输入法输入文字</string>
-    <string name="send_text">发送到平板</string>
 
     <string name="permission_denied">权限被拒绝，无法读取蓝牙设备。</string>
     <string name="hid_not_ready">HID 服务尚未就绪。</string>
     <string name="select_device_first">请先选择设备。</string>
     <string name="connect_request_failed">发起连接失败，请确认目标设备已允许输入设备连接。</string>
-    <string name="not_connected">尚未连接到平板设备。</string>
-
     <string name="hid_name">Phone Bluetooth Keyboard</string>
     <string name="hid_description">Use phone IME to type on tablet</string>
     <string name="hid_provider">BluetoothKeyboard</string>

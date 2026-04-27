@@ -4,7 +4,6 @@ import android.Manifest;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothHidDevice;
-import android.bluetooth.BluetoothHidDeviceAppQosSettings;
 import android.bluetooth.BluetoothHidDeviceAppSdpSettings;
 import android.bluetooth.BluetoothProfile;
 import android.content.Context;
@@ -13,6 +12,8 @@ import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.text.TextUtils;
+import android.text.TextWatcher;
+import android.text.Editable;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -32,7 +33,6 @@ import androidx.core.content.ContextCompat;
 import com.google.android.material.appbar.MaterialToolbar;
 import com.google.android.material.color.DynamicColors;
 
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -58,7 +58,6 @@ public class MainActivity extends AppCompatActivity {
     private TextView statusText;
     private EditText inputEditText;
     private Button connectButton;
-    private Button sendButton;
     private DeviceListAdapter deviceListAdapter;
 
     private SharedPreferences sharedPreferences;
@@ -136,7 +135,6 @@ public class MainActivity extends AppCompatActivity {
         statusText = findViewById(R.id.statusText);
         inputEditText = findViewById(R.id.inputEditText);
         connectButton = findViewById(R.id.connectButton);
-        sendButton = findViewById(R.id.sendButton);
 
         ListView deviceListView = findViewById(R.id.deviceListView);
         deviceListAdapter = new DeviceListAdapter(this, bondedDevices);
@@ -149,7 +147,43 @@ public class MainActivity extends AppCompatActivity {
         });
 
         connectButton.setOnClickListener(v -> connectSelectedDevice());
-        sendButton.setOnClickListener(v -> sendInputText());
+        inputEditText.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+                // no-op
+            }
+
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+                if (connectedHost == null || bluetoothHidDevice == null) {
+                    return;
+                }
+
+                if (before > 0) {
+                    hidExecutor.execute(() -> {
+                        for (int i = 0; i < before; i++) {
+                            sendBackspace();
+                            sleepShortly();
+                        }
+                    });
+                }
+
+                if (count > 0) {
+                    String inserted = s.subSequence(start, start + count).toString();
+                    hidExecutor.execute(() -> {
+                        for (char c : inserted.toCharArray()) {
+                            sendKeyForChar(c);
+                            sleepShortly();
+                        }
+                    });
+                }
+            }
+
+            @Override
+            public void afterTextChanged(Editable s) {
+                // no-op
+            }
+        });
 
         refreshSendState();
         requestBluetoothPermissionsIfNeeded();
@@ -272,24 +306,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void sendInputText() {
-        String text = inputEditText.getText() == null ? "" : inputEditText.getText().toString();
-        if (TextUtils.isEmpty(text)) {
-            return;
-        }
-        if (connectedHost == null || bluetoothHidDevice == null) {
-            Toast.makeText(this, R.string.not_connected, Toast.LENGTH_SHORT).show();
-            return;
-        }
-
-        hidExecutor.execute(() -> {
-            for (char c : text.toCharArray()) {
-                sendKeyForChar(c);
-                sleepShortly();
-            }
-        });
-    }
-
     private void sendKeyForChar(char c) {
         KeyStroke keyStroke = KeyStroke.from(c);
         if (keyStroke == null || connectedHost == null || bluetoothHidDevice == null) {
@@ -305,12 +321,23 @@ public class MainActivity extends AppCompatActivity {
         bluetoothHidDevice.sendReport(connectedHost, REPORT_ID_KEYBOARD, release);
     }
 
+    private void sendBackspace() {
+        if (connectedHost == null || bluetoothHidDevice == null) {
+            return;
+        }
+        byte[] report = new byte[8];
+        report[2] = 0x2A;
+        bluetoothHidDevice.sendReport(connectedHost, REPORT_ID_KEYBOARD, report);
+        bluetoothHidDevice.sendReport(connectedHost, REPORT_ID_KEYBOARD, new byte[8]);
+    }
+
     private void refreshSendState() {
-        boolean readyToConnect = selectedDevice != null;
-        boolean readyToSend = connectedHost != null;
-        connectButton.setEnabled(readyToConnect);
-        sendButton.setEnabled(readyToSend);
-        inputEditText.setEnabled(readyToSend);
+        runOnUiThread(() -> {
+            boolean readyToConnect = selectedDevice != null;
+            boolean readyToSend = connectedHost != null;
+            connectButton.setEnabled(readyToConnect);
+            inputEditText.setEnabled(readyToSend);
+        });
     }
 
     private void updateStatus(String text) {
