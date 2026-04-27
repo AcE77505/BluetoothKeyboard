@@ -81,6 +81,7 @@ public class MainActivity extends AppCompatActivity {
             if (profile == BluetoothProfile.HID_DEVICE) {
                 bluetoothHidDevice = (BluetoothHidDevice) proxy;
                 registerHidApp();
+                autoReconnectLastDeviceIfNeeded();
             }
         }
 
@@ -102,6 +103,7 @@ public class MainActivity extends AppCompatActivity {
             hidAppRegisteredInProcess = registered;
             if (registered) {
                 updateStatus(getString(R.string.status_ready_select_device));
+                autoReconnectLastDeviceIfNeeded();
             } else {
                 updateStatus(getString(R.string.status_hid_register_failed));
             }
@@ -212,6 +214,7 @@ public class MainActivity extends AppCompatActivity {
         if (hasBluetoothPermissions()) {
             initBluetooth();
             loadBondedDevices();
+            autoReconnectLastDeviceIfNeeded();
         }
     }
 
@@ -332,6 +335,52 @@ public class MainActivity extends AppCompatActivity {
         if (!requested) {
             Toast.makeText(this, R.string.connect_request_failed, Toast.LENGTH_SHORT).show();
         }
+    }
+
+    private void autoReconnectLastDeviceIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            return;
+        }
+        if (bluetoothHidDevice == null || connectedHost != null || !isHidAppRegistered()) {
+            return;
+        }
+
+        String lastAddress = sharedPreferences.getString(KEY_LAST_CONNECTED_ADDRESS, null);
+        if (TextUtils.isEmpty(lastAddress)) {
+            return;
+        }
+
+        BluetoothDevice lastDevice = findBondedDeviceByAddress(lastAddress);
+        if (lastDevice == null) {
+            return;
+        }
+
+        int state = bluetoothHidDevice.getConnectionState(lastDevice);
+        if (state == BluetoothProfile.STATE_CONNECTED || state == BluetoothProfile.STATE_CONNECTING) {
+            selectedDevice = lastDevice;
+            refreshSendState();
+            return;
+        }
+
+        selectedDevice = lastDevice;
+        refreshSendState();
+        bluetoothHidDevice.connect(lastDevice);
+    }
+
+    private BluetoothDevice findBondedDeviceByAddress(String address) {
+        if (bluetoothAdapter == null || TextUtils.isEmpty(address) || !hasBluetoothPermissions()) {
+            return null;
+        }
+        Set<BluetoothDevice> bondedSet = bluetoothAdapter.getBondedDevices();
+        if (bondedSet == null) {
+            return null;
+        }
+        for (BluetoothDevice device : bondedSet) {
+            if (address.equals(device.getAddress())) {
+                return device;
+            }
+        }
+        return null;
     }
 
     private void sendKeyForChar(char c) {
