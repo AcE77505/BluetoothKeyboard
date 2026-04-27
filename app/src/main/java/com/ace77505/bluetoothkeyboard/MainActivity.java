@@ -1,0 +1,658 @@
+package com.ace77505.bluetoothkeyboard;
+
+import android.Manifest;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothHidDevice;
+import android.bluetooth.BluetoothHidDeviceAppSdpSettings;
+import android.bluetooth.BluetoothProfile;
+import android.content.Context;
+import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.os.Build;
+import android.os.Bundle;
+import android.text.TextUtils;
+import android.text.TextWatcher;
+import android.text.Editable;
+import android.view.LayoutInflater;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.ArrayAdapter;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.ListView;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.activity.OnBackPressedCallback;
+import androidx.annotation.NonNull;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.ContextCompat;
+
+import com.google.android.material.appbar.MaterialToolbar;
+import com.google.android.material.color.DynamicColors;
+import com.google.android.material.color.MaterialColors;
+import com.google.android.material.card.MaterialCardView;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+public class MainActivity extends AppCompatActivity {
+
+    private static final String PREFS_NAME = "keyboard_prefs";
+    private static final String KEY_LAST_CONNECTED_ADDRESS = "last_connected_address";
+    private static final byte REPORT_ID_KEYBOARD = 1;
+    private static volatile boolean hidAppRegisteredInProcess = false;
+
+    private final List<BluetoothDevice> bondedDevices = new ArrayList<>();
+    private final ExecutorService hidExecutor = Executors.newSingleThreadExecutor();
+
+    private BluetoothAdapter bluetoothAdapter;
+    private BluetoothHidDevice bluetoothHidDevice;
+    private BluetoothDevice connectedHost;
+    private BluetoothDevice selectedDevice;
+    private String lastSentHidText = "";
+
+    private TextView statusText;
+    private EditText inputEditText;
+    private Button connectButton;
+    private DeviceListAdapter deviceListAdapter;
+
+    private SharedPreferences sharedPreferences;
+
+    private final ActivityResultLauncher<String[]> permissionLauncher =
+            registerForActivityResult(new ActivityResultContracts.RequestMultiplePermissions(), result -> {
+                if (hasBluetoothPermissions()) {
+                    initBluetooth();
+                    loadBondedDevices();
+                } else {
+                    Toast.makeText(this, R.string.permission_denied, Toast.LENGTH_LONG).show();
+                    updateStatus(getString(R.string.status_permission_needed));
+                }
+            });
+
+    private final BluetoothProfile.ServiceListener serviceListener = new BluetoothProfile.ServiceListener() {
+        @Override
+        public void onServiceConnected(int profile, BluetoothProfile proxy) {
+            if (profile == BluetoothProfile.HID_DEVICE) {
+                bluetoothHidDevice = (BluetoothHidDevice) proxy;
+                registerHidApp();
+                autoReconnectLastDeviceIfNeeded();
+            }
+        }
+
+        @Override
+        public void onServiceDisconnected(int profile) {
+            if (profile == BluetoothProfile.HID_DEVICE) {
+                bluetoothHidDevice = null;
+                connectedHost = null;
+                hidAppRegisteredInProcess = false;
+                updateStatus(getString(R.string.status_hid_disconnected));
+                refreshSendState();
+            }
+        }
+    };
+
+    private final BluetoothHidDevice.Callback hidCallback = new BluetoothHidDevice.Callback() {
+        @Override
+        public void onAppStatusChanged(BluetoothDevice pluggedDevice, boolean registered) {
+            hidAppRegisteredInProcess = registered;
+            if (registered) {
+                updateStatus(getString(R.string.status_ready_select_device));
+                autoReconnectLastDeviceIfNeeded();
+            } else {
+                updateStatus(getString(R.string.status_hid_register_failed));
+            }
+        }
+
+        @Override
+        public void onConnectionStateChanged(BluetoothDevice device, int state) {
+            if (state == BluetoothProfile.STATE_CONNECTED) {
+                connectedHost = device;
+                lastSentHidText = "";
+                persistLastConnected(device);
+                updateStatus(getString(R.string.status_connected, readableName(device)));
+                Editable editable = inputEditText.getText();
+                if (editable != null && editable.length() > 0) {
+                    String text = editable.toString();
+                    hidExecutor.execute(() -> syncTextToHost(text));
+                }
+            } else if (state == BluetoothProfile.STATE_CONNECTING) {
+                updateStatus(getString(R.string.status_connecting, readableName(device)));
+            } else {
+                if (connectedHost != null && connectedHost.getAddress().equals(device.getAddress())) {
+                    connectedHost = null;
+                }
+                lastSentHidText = "";
+                updateStatus(getString(R.string.status_disconnected, readableName(device)));
+            }
+            refreshSendState();
+        }
+    };
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        DynamicColors.applyToActivitiesIfAvailable(getApplication());
+        setContentView(R.layout.activity_main);
+
+        sharedPreferences = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+
+        MaterialToolbar toolbar = findViewById(R.id.toolbar);
+        setSupportActionBar(toolbar);
+
+        statusText = findViewById(R.id.statusText);
+        inputEditText = findViewById(R.id.inputEditText);
+        connectButton = findViewById(R.id.connectButton);
+
+        ListView deviceListView = findViewById(R.id.deviceListView);
+        deviceListAdapter = new DeviceListAdapter(this, bondedDevices);
+        deviceListView.setAdapter(deviceListAdapter);
+
+        deviceListView.setOnItemClickListener((parent, view, position, id) -> {
+            selectedDevice = bondedDevices.get(position);
+            deviceListAdapter.notifyDataSetChanged();
+            refreshSendState();
+        });
+
+        connectButton.setOnClickListener(v -> connectSelectedDevice());
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                moveTaskToBack(true);
+            }
+        });
+        inputEditText.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+                // no-op
+            }
+
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+                if (connectedHost == null || bluetoothHidDevice == null) {
+                    return;
+                }
+            }
+
+            @Override
+            public void afterTextChanged(Editable s) {
+                if (connectedHost == null || bluetoothHidDevice == null) {
+                    return;
+                }
+                String sourceText = s.toString();
+                hidExecutor.execute(() -> syncTextToHost(sourceText));
+            }
+        });
+
+        refreshSendState();
+        requestBluetoothPermissionsIfNeeded();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        // Intentionally keep HID session alive when leaving UI so host connection isn't dropped.
+        // Session cleanup is left to system process teardown.
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (hasBluetoothPermissions()) {
+            initBluetooth();
+            loadBondedDevices();
+            autoReconnectLastDeviceIfNeeded();
+        }
+    }
+
+    private void requestBluetoothPermissionsIfNeeded() {
+        if (hasBluetoothPermissions()) {
+            initBluetooth();
+            loadBondedDevices();
+            return;
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            permissionLauncher.launch(new String[]{
+                    Manifest.permission.BLUETOOTH_CONNECT,
+                    Manifest.permission.BLUETOOTH_SCAN
+            });
+        } else {
+            permissionLauncher.launch(new String[]{
+                    Manifest.permission.BLUETOOTH,
+                    Manifest.permission.BLUETOOTH_ADMIN
+            });
+        }
+    }
+
+    private boolean hasBluetoothPermissions() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            return ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+                    && ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED;
+        }
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH) == PackageManager.PERMISSION_GRANTED
+                && ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADMIN) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void initBluetooth() {
+        bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
+        if (bluetoothAdapter == null) {
+            updateStatus(getString(R.string.status_bluetooth_not_supported));
+            return;
+        }
+
+        if (!bluetoothAdapter.isEnabled()) {
+            updateStatus(getString(R.string.status_enable_bluetooth));
+            return;
+        }
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            updateStatus(getString(R.string.status_need_android_p));
+            return;
+        }
+
+        if (bluetoothHidDevice != null) {
+            registerHidApp();
+            return;
+        }
+
+        bluetoothAdapter.getProfileProxy(this, serviceListener, BluetoothProfile.HID_DEVICE);
+    }
+
+    private void registerHidApp() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P || bluetoothHidDevice == null) {
+            return;
+        }
+        if (isHidAppRegistered()) {
+            updateStatus(getString(R.string.status_ready_select_device));
+            return;
+        }
+
+        BluetoothHidDeviceAppSdpSettings sdp = new BluetoothHidDeviceAppSdpSettings(
+                getString(R.string.hid_name),
+                getString(R.string.hid_description),
+                getString(R.string.hid_provider),
+                BluetoothHidDevice.SUBCLASS1_COMBO,
+                buildKeyboardDescriptor()
+        );
+
+        boolean ok = bluetoothHidDevice.registerApp(sdp, null, null, hidExecutor, hidCallback);
+        if (!ok) {
+            updateStatus(getString(R.string.status_hid_register_failed));
+        }
+    }
+
+    private boolean isHidAppRegistered() {
+        return hidAppRegisteredInProcess;
+    }
+
+    private void loadBondedDevices() {
+        bondedDevices.clear();
+        if (bluetoothAdapter == null || !hasBluetoothPermissions()) {
+            deviceListAdapter.notifyDataSetChanged();
+            return;
+        }
+
+        Set<BluetoothDevice> set = bluetoothAdapter.getBondedDevices();
+        if (set != null) {
+            bondedDevices.addAll(set);
+        }
+
+        String lastAddress = sharedPreferences.getString(KEY_LAST_CONNECTED_ADDRESS, null);
+        sortDevices(bondedDevices, lastAddress);
+
+        deviceListAdapter.notifyDataSetChanged();
+        if (bondedDevices.isEmpty()) {
+            updateStatus(getString(R.string.status_no_paired));
+        }
+    }
+
+    private void connectSelectedDevice() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P || bluetoothHidDevice == null) {
+            Toast.makeText(this, R.string.hid_not_ready, Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        if (selectedDevice == null) {
+            Toast.makeText(this, R.string.select_device_first, Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        boolean requested = bluetoothHidDevice.connect(selectedDevice);
+        if (!requested) {
+            Toast.makeText(this, R.string.connect_request_failed, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void autoReconnectLastDeviceIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            return;
+        }
+        if (bluetoothHidDevice == null || connectedHost != null || !isHidAppRegistered()) {
+            return;
+        }
+
+        String lastAddress = sharedPreferences.getString(KEY_LAST_CONNECTED_ADDRESS, null);
+        if (TextUtils.isEmpty(lastAddress)) {
+            return;
+        }
+
+        BluetoothDevice lastDevice = findBondedDeviceByAddress(lastAddress);
+        if (lastDevice == null) {
+            return;
+        }
+
+        int state = bluetoothHidDevice.getConnectionState(lastDevice);
+        if (state == BluetoothProfile.STATE_CONNECTED || state == BluetoothProfile.STATE_CONNECTING) {
+            selectedDevice = lastDevice;
+            refreshSendState();
+            return;
+        }
+
+        selectedDevice = lastDevice;
+        refreshSendState();
+        updateStatus(getString(R.string.status_reconnecting, readableName(lastDevice)));
+        bluetoothHidDevice.connect(lastDevice);
+    }
+
+    private BluetoothDevice findBondedDeviceByAddress(String address) {
+        if (bluetoothAdapter == null || TextUtils.isEmpty(address) || !hasBluetoothPermissions()) {
+            return null;
+        }
+        Set<BluetoothDevice> bondedSet = bluetoothAdapter.getBondedDevices();
+        if (bondedSet == null) {
+            return null;
+        }
+        for (BluetoothDevice device : bondedSet) {
+            if (address.equals(device.getAddress())) {
+                return device;
+            }
+        }
+        return null;
+    }
+
+    private void sendKeyForChar(char c) {
+        KeyStroke keyStroke = KeyStroke.from(c);
+        if (keyStroke == null || connectedHost == null || bluetoothHidDevice == null) {
+            return;
+        }
+
+        byte[] report = new byte[8];
+        report[0] = keyStroke.modifier;
+        report[2] = keyStroke.keyCode;
+        bluetoothHidDevice.sendReport(connectedHost, REPORT_ID_KEYBOARD, report);
+
+        byte[] release = new byte[8];
+        bluetoothHidDevice.sendReport(connectedHost, REPORT_ID_KEYBOARD, release);
+    }
+
+    private void sendBackspace() {
+        if (connectedHost == null || bluetoothHidDevice == null) {
+            return;
+        }
+        byte[] report = new byte[8];
+        report[2] = 0x2A;
+        bluetoothHidDevice.sendReport(connectedHost, REPORT_ID_KEYBOARD, report);
+        bluetoothHidDevice.sendReport(connectedHost, REPORT_ID_KEYBOARD, new byte[8]);
+    }
+
+    private void syncTextToHost(String sourceText) {
+        String targetText = convertToHidText(sourceText);
+        int common = sharedPrefixLength(lastSentHidText, targetText);
+
+        for (int i = 0; i < lastSentHidText.length() - common; i++) {
+            sendBackspace();
+            sleepShortly();
+        }
+        for (int i = common; i < targetText.length(); i++) {
+            sendKeyForChar(targetText.charAt(i));
+            sleepShortly();
+        }
+        lastSentHidText = targetText;
+    }
+
+    private int sharedPrefixLength(String a, String b) {
+        int max = Math.min(a.length(), b.length());
+        int i = 0;
+        while (i < max && a.charAt(i) == b.charAt(i)) {
+            i++;
+        }
+        return i;
+    }
+
+    private String convertToHidText(String source) {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < source.length(); i++) {
+            char c = source.charAt(i);
+            if (KeyStroke.from(c) != null) {
+                out.append(c);
+                continue;
+            }
+            String fallback = convertUnsupportedChar(c);
+            if (!TextUtils.isEmpty(fallback)) {
+                out.append(fallback);
+            }
+        }
+        return out.toString();
+    }
+
+    private String convertUnsupportedChar(char c) {
+        if (c == '￥') {
+            return "$";
+        }
+        if (isLikelyCjk(c)) {
+            return transliterateCjkToLatin(c);
+        }
+        return "";
+    }
+
+    private boolean isLikelyCjk(char c) {
+        Character.UnicodeBlock block = Character.UnicodeBlock.of(c);
+        return block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS
+                || block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_A
+                || block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_B
+                || block == Character.UnicodeBlock.CJK_COMPATIBILITY_IDEOGRAPHS;
+    }
+
+    private String transliterateCjkToLatin(char c) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            return "";
+        }
+        android.icu.text.Transliterator transliterator = android.icu.text.Transliterator.getInstance(
+                "Han-Latin; NFD; [:Nonspacing Mark:] Remove; NFC; Lower()");
+        String raw = transliterator.transliterate(String.valueOf(c));
+        return raw.replaceAll("[^a-z0-9]", "");
+    }
+
+    private void refreshSendState() {
+        runOnUiThread(() -> {
+            boolean readyToConnect = selectedDevice != null;
+            boolean readyToSend = connectedHost != null;
+            connectButton.setEnabled(readyToConnect);
+            inputEditText.setEnabled(readyToSend);
+            deviceListAdapter.notifyDataSetChanged();
+        });
+    }
+
+    private void updateStatus(String text) {
+        runOnUiThread(() -> statusText.setText(text));
+    }
+
+    private void persistLastConnected(BluetoothDevice device) {
+        sharedPreferences.edit().putString(KEY_LAST_CONNECTED_ADDRESS, device.getAddress()).apply();
+        sortDevices(bondedDevices, device.getAddress());
+        runOnUiThread(() -> deviceListAdapter.notifyDataSetChanged());
+    }
+
+    private void sortDevices(List<BluetoothDevice> devices, String lastConnectedAddress) {
+        Collections.sort(devices, Comparator
+                .comparing((BluetoothDevice d) -> !d.getAddress().equals(lastConnectedAddress))
+                .thenComparing(this::readableName));
+    }
+
+    @NonNull
+    private String readableName(BluetoothDevice device) {
+        String name = hasBluetoothPermissions() ? device.getName() : null;
+        if (TextUtils.isEmpty(name)) {
+            return device.getAddress();
+        }
+        return name + " (" + device.getAddress() + ")";
+    }
+
+    private byte[] buildKeyboardDescriptor() {
+        return new byte[]{
+                0x05, 0x01,
+                0x09, 0x06,
+                (byte) 0xA1, 0x01,
+                (byte) 0x85, 0x01,
+                0x05, 0x07,
+                0x19, (byte) 0xE0,
+                0x29, (byte) 0xE7,
+                0x15, 0x00,
+                0x25, 0x01,
+                0x75, 0x01,
+                (byte) 0x95, 0x08,
+                (byte) 0x81, 0x02,
+                (byte) 0x95, 0x01,
+                0x75, 0x08,
+                (byte) 0x81, 0x01,
+                (byte) 0x95, 0x06,
+                0x75, 0x08,
+                0x15, 0x00,
+                0x25, 0x65,
+                0x05, 0x07,
+                0x19, 0x00,
+                0x29, 0x65,
+                (byte) 0x81, 0x00,
+                (byte) 0xC0
+        };
+    }
+
+    private void sleepShortly() {
+        try {
+            Thread.sleep(12);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private class DeviceListAdapter extends ArrayAdapter<BluetoothDevice> {
+
+        private final LayoutInflater inflater;
+
+        DeviceListAdapter(@NonNull Context context, @NonNull List<BluetoothDevice> devices) {
+            super(context, 0, devices);
+            inflater = LayoutInflater.from(context);
+        }
+
+        @NonNull
+        @Override
+        public View getView(int position, View convertView, @NonNull ViewGroup parent) {
+            View view = convertView;
+            if (view == null) {
+                view = inflater.inflate(R.layout.item_device, parent, false);
+            }
+
+            BluetoothDevice device = getItem(position);
+            MaterialCardView card = view.findViewById(R.id.deviceItemCard);
+            TextView nameText = view.findViewById(R.id.deviceNameText);
+            TextView macText = view.findViewById(R.id.deviceMacText);
+            if (device != null) {
+                String deviceName = device.getName();
+                if (TextUtils.isEmpty(deviceName)) {
+                    deviceName = device.getAddress();
+                }
+                nameText.setText(deviceName);
+                macText.setText(device.getAddress().toLowerCase(Locale.US));
+
+                boolean isSelected = selectedDevice != null
+                        && selectedDevice.getAddress().equals(device.getAddress());
+                int strokeColor = isSelected
+                        ? MaterialColors.getColor(card, com.google.android.material.R.attr.colorPrimary)
+                        : MaterialColors.getColor(card, com.google.android.material.R.attr.colorOutlineVariant);
+                int strokeWidth = isSelected ? dpToPx(2) : dpToPx(1);
+                card.setStrokeColor(strokeColor);
+                card.setStrokeWidth(strokeWidth);
+            }
+            return view;
+        }
+
+        private int dpToPx(int dp) {
+            float density = getContext().getResources().getDisplayMetrics().density;
+            return Math.round(dp * density);
+        }
+    }
+
+    private static class KeyStroke {
+        final byte keyCode;
+        final byte modifier;
+
+        KeyStroke(byte keyCode, byte modifier) {
+            this.keyCode = keyCode;
+            this.modifier = modifier;
+        }
+
+        static KeyStroke from(char c) {
+            if (c >= 'a' && c <= 'z') {
+                return new KeyStroke((byte) (0x04 + (c - 'a')), (byte) 0x00);
+            }
+            if (c >= 'A' && c <= 'Z') {
+                return new KeyStroke((byte) (0x04 + (c - 'A')), (byte) 0x02);
+            }
+            if (c >= '1' && c <= '9') {
+                return new KeyStroke((byte) (0x1E + (c - '1')), (byte) 0x00);
+            }
+            if (c == '0') {
+                return new KeyStroke((byte) 0x27, (byte) 0x00);
+            }
+
+            switch (c) {
+                case ' ':
+                    return new KeyStroke((byte) 0x2C, (byte) 0x00);
+                case '\n':
+                    return new KeyStroke((byte) 0x28, (byte) 0x00);
+                case '.':
+                    return new KeyStroke((byte) 0x37, (byte) 0x00);
+                case ',':
+                    return new KeyStroke((byte) 0x36, (byte) 0x00);
+                case '!':
+                    return new KeyStroke((byte) 0x1E, (byte) 0x02);
+                case '?':
+                    return new KeyStroke((byte) 0x38, (byte) 0x02);
+                case '-':
+                    return new KeyStroke((byte) 0x2D, (byte) 0x00);
+                case '_':
+                    return new KeyStroke((byte) 0x2D, (byte) 0x02);
+                case ':':
+                    return new KeyStroke((byte) 0x33, (byte) 0x02);
+                case ';':
+                    return new KeyStroke((byte) 0x33, (byte) 0x00);
+                case '/':
+                    return new KeyStroke((byte) 0x38, (byte) 0x00);
+                case '@':
+                    return new KeyStroke((byte) 0x1F, (byte) 0x02);
+                case '+':
+                    return new KeyStroke((byte) 0x2E, (byte) 0x02);
+                case '=':
+                    return new KeyStroke((byte) 0x2E, (byte) 0x00);
+                case '*':
+                    return new KeyStroke((byte) 0x25, (byte) 0x02);
+                case '#':
+                    return new KeyStroke((byte) 0x20, (byte) 0x02);
+                case '%':
+                    return new KeyStroke((byte) 0x22, (byte) 0x02);
+                default:
+                    return null;
+            }
+        }
+    }
+}

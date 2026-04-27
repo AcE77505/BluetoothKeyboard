@@ -1,3 +1,28 @@
 <resources>
-    <string name="app_name">BluetoothKeyboard</string>
+    <string name="app_name">Bluetooth Keyboard</string>
+    <string name="status_loading">正在准备蓝牙键盘…</string>
+    <string name="status_permission_needed">需要蓝牙权限后才能继续。</string>
+    <string name="status_hid_disconnected">HID 服务已断开。</string>
+    <string name="status_ready_select_device">请先选择要发送输入的已配对设备。</string>
+    <string name="status_hid_register_failed">HID 注册失败，可能设备不支持手机作为蓝牙键盘。</string>
+    <string name="status_connected">已连接：%1$s</string>
+    <string name="status_connecting">连接中：%1$s</string>
+    <string name="status_reconnecting">重连中：%1$s</string>
+    <string name="status_disconnected">已断开：%1$s</string>
+    <string name="status_bluetooth_not_supported">当前设备不支持蓝牙。</string>
+    <string name="status_enable_bluetooth">请先在系统设置中开启蓝牙。</string>
+    <string name="status_need_android_p">需要 Android 9.0 (API 28) 及以上版本以支持 HID 键盘模式。</string>
+    <string name="status_no_paired">没有已配对设备，请先在系统蓝牙设置中配对平板。</string>
+
+    <string name="paired_devices_title">已配对设备（上次连接优先显示）</string>
+    <string name="connect_selected">连接选中设备</string>
+    <string name="input_hint">使用手机系统输入法输入文字</string>
+
+    <string name="permission_denied">权限被拒绝，无法读取蓝牙设备。</string>
+    <string name="hid_not_ready">HID 服务尚未就绪。</string>
+    <string name="select_device_first">请先选择设备。</string>
+    <string name="connect_request_failed">发起连接失败，请确认目标设备已允许输入设备连接。</string>
+    <string name="hid_name">Phone Bluetooth Keyboard</string>
+    <string name="hid_description">Use phone IME to type on tablet</string>
+    <string name="hid_provider">BluetoothKeyboard</string>
 </resources>
