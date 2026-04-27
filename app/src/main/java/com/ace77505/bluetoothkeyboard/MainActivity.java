@@ -26,6 +26,7 @@ import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
@@ -150,6 +151,12 @@ public class MainActivity extends AppCompatActivity {
         });
 
         connectButton.setOnClickListener(v -> connectSelectedDevice());
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                moveTaskToBack(true);
+            }
+        });
         inputEditText.addTextChangedListener(new TextWatcher() {
             @Override
             public void beforeTextChanged(CharSequence s, int start, int count, int after) {
@@ -195,17 +202,8 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        if (!isFinishing()) {
-            return;
-        }
-        if (bluetoothAdapter != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            if (bluetoothHidDevice != null && isHidAppRegistered()) {
-                bluetoothHidDevice.unregisterApp();
-                hidAppRegisteredInProcess = false;
-            }
-            bluetoothAdapter.closeProfileProxy(BluetoothProfile.HID_DEVICE, bluetoothHidDevice);
-        }
-        hidExecutor.shutdownNow();
+        // Intentionally keep HID session alive when leaving UI so host connection isn't dropped.
+        // Session cleanup is left to system process teardown.
     }
 
     @Override
