@@ -46,6 +46,7 @@ public class MainActivity extends AppCompatActivity {
     private static final String PREFS_NAME = "keyboard_prefs";
     private static final String KEY_LAST_CONNECTED_ADDRESS = "last_connected_address";
     private static final byte REPORT_ID_KEYBOARD = 1;
+    private static volatile boolean hidAppRegisteredInProcess = false;
 
     private final List<BluetoothDevice> bondedDevices = new ArrayList<>();
     private final ExecutorService hidExecutor = Executors.newSingleThreadExecutor();
@@ -87,6 +88,7 @@ public class MainActivity extends AppCompatActivity {
             if (profile == BluetoothProfile.HID_DEVICE) {
                 bluetoothHidDevice = null;
                 connectedHost = null;
+                hidAppRegisteredInProcess = false;
                 updateStatus(getString(R.string.status_hid_disconnected));
                 refreshSendState();
             }
@@ -96,6 +98,7 @@ public class MainActivity extends AppCompatActivity {
     private final BluetoothHidDevice.Callback hidCallback = new BluetoothHidDevice.Callback() {
         @Override
         public void onAppStatusChanged(BluetoothDevice pluggedDevice, boolean registered) {
+            hidAppRegisteredInProcess = registered;
             if (registered) {
                 updateStatus(getString(R.string.status_ready_select_device));
             } else {
@@ -198,6 +201,7 @@ public class MainActivity extends AppCompatActivity {
         if (bluetoothAdapter != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             if (bluetoothHidDevice != null && isHidAppRegistered()) {
                 bluetoothHidDevice.unregisterApp();
+                hidAppRegisteredInProcess = false;
             }
             bluetoothAdapter.closeProfileProxy(BluetoothProfile.HID_DEVICE, bluetoothHidDevice);
         }
@@ -291,11 +295,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private boolean isHidAppRegistered() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P || bluetoothHidDevice == null) {
-            return false;
-        }
-        String appName = bluetoothHidDevice.getUserAppName();
-        return !TextUtils.isEmpty(appName);
+        return hidAppRegisteredInProcess;
     }
 
     private void loadBondedDevices() {
