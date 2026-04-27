@@ -33,11 +33,14 @@ import androidx.core.content.ContextCompat;
 
 import com.google.android.material.appbar.MaterialToolbar;
 import com.google.android.material.color.DynamicColors;
+import com.google.android.material.color.MaterialColors;
+import com.google.android.material.card.MaterialCardView;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -145,10 +148,10 @@ public class MainActivity extends AppCompatActivity {
         ListView deviceListView = findViewById(R.id.deviceListView);
         deviceListAdapter = new DeviceListAdapter(this, bondedDevices);
         deviceListView.setAdapter(deviceListAdapter);
-        deviceListView.setChoiceMode(ListView.CHOICE_MODE_SINGLE);
 
         deviceListView.setOnItemClickListener((parent, view, position, id) -> {
             selectedDevice = bondedDevices.get(position);
+            deviceListAdapter.notifyDataSetChanged();
             refreshSendState();
         });
 
@@ -364,6 +367,7 @@ public class MainActivity extends AppCompatActivity {
 
         selectedDevice = lastDevice;
         refreshSendState();
+        updateStatus(getString(R.string.status_reconnecting, readableName(lastDevice)));
         bluetoothHidDevice.connect(lastDevice);
     }
 
@@ -414,6 +418,7 @@ public class MainActivity extends AppCompatActivity {
             boolean readyToSend = connectedHost != null;
             connectButton.setEnabled(readyToConnect);
             inputEditText.setEnabled(readyToSend);
+            deviceListAdapter.notifyDataSetChanged();
         });
     }
 
@@ -479,7 +484,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private static class DeviceListAdapter extends ArrayAdapter<BluetoothDevice> {
+    private class DeviceListAdapter extends ArrayAdapter<BluetoothDevice> {
 
         private final LayoutInflater inflater;
 
@@ -493,21 +498,36 @@ public class MainActivity extends AppCompatActivity {
         public View getView(int position, View convertView, @NonNull ViewGroup parent) {
             View view = convertView;
             if (view == null) {
-                view = inflater.inflate(android.R.layout.simple_list_item_single_choice, parent, false);
+                view = inflater.inflate(R.layout.item_device, parent, false);
             }
 
             BluetoothDevice device = getItem(position);
-            TextView text = view.findViewById(android.R.id.text1);
+            MaterialCardView card = view.findViewById(R.id.deviceItemCard);
+            TextView nameText = view.findViewById(R.id.deviceNameText);
+            TextView macText = view.findViewById(R.id.deviceMacText);
             if (device != null) {
                 String deviceName = device.getName();
                 if (TextUtils.isEmpty(deviceName)) {
                     deviceName = device.getAddress();
-                } else {
-                    deviceName = deviceName + "\n" + device.getAddress();
                 }
-                text.setText(deviceName);
+                nameText.setText(deviceName);
+                macText.setText(device.getAddress().toLowerCase(Locale.US));
+
+                boolean isSelected = selectedDevice != null
+                        && selectedDevice.getAddress().equals(device.getAddress());
+                int strokeColor = isSelected
+                        ? MaterialColors.getColor(card, com.google.android.material.R.attr.colorPrimary)
+                        : MaterialColors.getColor(card, com.google.android.material.R.attr.colorOutlineVariant);
+                int strokeWidth = isSelected ? dpToPx(2) : dpToPx(1);
+                card.setStrokeColor(strokeColor);
+                card.setStrokeWidth(strokeWidth);
             }
             return view;
+        }
+
+        private int dpToPx(int dp) {
+            float density = getContext().getResources().getDisplayMetrics().density;
+            return Math.round(dp * density);
         }
     }
 
